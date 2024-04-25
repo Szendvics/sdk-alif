@@ -16,6 +16,7 @@ LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 #include <zephyr/devicetree.h>
 #include <string.h>
 #include <zephyr/drivers/spi.h>
+#include <soc.h>
 
 #define Mhz		1000000
 #define khz		1000
@@ -50,7 +51,7 @@ void test_spi_transceive(const struct device *dev,
 	struct spi_config cnfg;
 	int length;
 	cnfg.frequency = 1 * Mhz;
-	cnfg.operation = SPI_OP_MODE_MASTER | SPI_WORD_SET(32) | SPI_MODE_LOOP;
+	cnfg.operation = SPI_OP_MODE_MASTER | SPI_WORD_SET(32);
 	printk("transceive operation %x\n", cnfg.operation);
 	cnfg.slave = 0;
 	cnfg.cs = cs;
@@ -100,8 +101,8 @@ void test_spi_receive(const struct device *dev,
 	cnfg.slave = 0;
 	cnfg.cs = NULL;
 
-	uint32_t rxdata[BUFF_SIZE];
-	int length = BUFF_SIZE * sizeof(rxdata[0]);
+	static uint32_t rxdata[BUFF_SIZE];
+	int length = (BUFF_SIZE) * sizeof(rxdata[0]);
 
 	struct spi_buf rx_buf = {
 		.buf = rxdata,
@@ -115,7 +116,7 @@ void test_spi_receive(const struct device *dev,
 	int ret = spi_transceive(dev, &cnfg, NULL, &rx_bufset);
 
 	printk("test SPI read only returns: %d\n", ret);
-	printk(" red %08x %08x %08x %08x %08x\n",
+	printk("slave read: %08x %08x %08x %08x %08x\n",
 		rxdata[0], rxdata[1], rxdata[2], rxdata[3], rxdata[4]);
 }
 
@@ -133,14 +134,15 @@ void test_spi_transmit(const struct device *dev,
 	cnfg.slave = 0;
 	cnfg.cs = cs;
 
-	uint32_t txdata[BUFF_SIZE] = { 0xFFFF1111, 0xFFFF2222,
+	static uint32_t txdata[BUFF_SIZE] = { 0xFFFF1111, 0xFFFF2222,
 					0xFFFF3333, 0xFFFF4444, 0xFFFF5555};
-	int length = BUFF_SIZE * sizeof(txdata[0]);
+	int length = (BUFF_SIZE) * sizeof(txdata[0]);
 
 	struct spi_buf tx_buf = {
 		.buf = txdata,
 		.len = length
 	};
+
 	struct spi_buf_set tx_bufset = {
 		.buffers = &tx_buf,
 		.count = 1
@@ -149,7 +151,7 @@ void test_spi_transmit(const struct device *dev,
 	int ret = spi_transceive(dev, &cnfg, &tx_bufset, NULL);
 
 	printk("test SPI write only returns: %d\n", ret);
-	printk(" wrote %08x %08x %08x %08x %08x\n",
+	printk("Master wrote: %08x %08x %08x %08x %08x\n",
 		txdata[0], txdata[1], txdata[2], txdata[3], txdata[4]);
 }
 
@@ -198,8 +200,98 @@ static void slave_spi(void *p1, void *p2, void *p3)
 	}
 }
 
+#if DT_NODE_HAS_COMPAT_STATUS(DT_NODELABEL(dma2), arm_dma_pl330, okay)
+static void configure_lpspi_for_dma2(void)
+{
+	//Enable LPSPI EVTRTR channel
+	#define LPSPI_DMA_GROUP					0
+	#define LPSPI_DMA_RX_PERIPH_REQ			12
+	#define LPSPI_DMA_TX_PERIPH_REQ			13
+
+	#define DMA_CTRL_ACK_TYPE_Pos			(16U)
+	#define DMA_CTRL_ENA					(1U << 4)
+
+	#define HE_DMA_SEL_LPSPI_Pos           (4)
+	#define HE_DMA_SEL_LPSPI_Msk           (0x3U << HE_DMA_SEL_LPSPI_Pos)
+
+	//enable group
+	sys_clear_bits(M55HE_CFG_HE_DMA_SEL, HE_DMA_SEL_LPSPI_Msk);
+
+	sys_write32(DMA_CTRL_ENA |
+			(0 << DMA_CTRL_ACK_TYPE_Pos),
+			EVTRTRLOCAL_DMA_CTRL0 + (LPSPI_DMA_RX_PERIPH_REQ * 4));
+
+	sys_write32(DMA_CTRL_ENA |
+			(0 << DMA_CTRL_ACK_TYPE_Pos),
+			EVTRTRLOCAL_DMA_CTRL0 + (LPSPI_DMA_TX_PERIPH_REQ * 4));
+}
+#elif DT_NODE_HAS_COMPAT_STATUS(DT_NODELABEL(dma0), arm_dma_pl330, okay)
+static void configure_spi0_lpspi_for_dma0(void)
+{
+	uint32_t regdata;
+
+	//Enable SPI0 & LPSPI EVTRTR channel
+	#define LPSPI_DMA_RX_PERIPH_REQ        24
+	#define LPSPI_DMA_TX_PERIPH_REQ        25
+	#define LPSPI_DMA_GROUP                2
+	#define SPI0_DMA_RX_PERIPH_REQ         16
+	#define SPI0_DMA_TX_PERIPH_REQ         20
+	#define SPI0_DMA_GROUP                 2
+
+	#define DMA_CTRL_ACK_TYPE_Pos          (16U)
+	#define DMA_CTRL_ENA                   (1U << 4)
+
+	/* Select DMA0 */
+	#define HE_DMA_SEL_LPSPI_Pos           (4)
+	#define HE_DMA_SEL_LPSPI_Msk           (0x3U << HE_DMA_SEL_LPSPI_Pos)
+
+
+	//enable group
+	regdata = sys_read32(M55HE_CFG_HE_DMA_SEL);
+	regdata |= ((LPSPI_DMA_GROUP << HE_DMA_SEL_LPSPI_Pos) &
+				HE_DMA_SEL_LPSPI_Msk);
+	sys_write32(regdata, M55HE_CFG_HE_DMA_SEL);
+	//channel enable
+	sys_write32(DMA_CTRL_ENA |
+			(0 << DMA_CTRL_ACK_TYPE_Pos)|
+			(LPSPI_DMA_GROUP),
+			EVTRTR0_DMA_CTRL0 + (LPSPI_DMA_RX_PERIPH_REQ * 4));
+	regdata = sys_read32(EVTRTR0_DMA_ACK_TYPE0 + (LPSPI_DMA_GROUP * 4));
+	regdata |= (1 << LPSPI_DMA_RX_PERIPH_REQ);
+	sys_write32(regdata, EVTRTR0_DMA_ACK_TYPE0 + (LPSPI_DMA_GROUP * 4));
+
+	sys_write32(DMA_CTRL_ENA |
+			(0 << DMA_CTRL_ACK_TYPE_Pos)|
+			(LPSPI_DMA_GROUP),
+			EVTRTR0_DMA_CTRL0 + (LPSPI_DMA_TX_PERIPH_REQ * 4));
+	regdata = sys_read32(EVTRTR0_DMA_ACK_TYPE0 + (LPSPI_DMA_GROUP * 4));
+	regdata |= (1 << LPSPI_DMA_TX_PERIPH_REQ);
+	sys_write32(regdata, EVTRTR0_DMA_ACK_TYPE0 + (LPSPI_DMA_GROUP * 4));
+
+	sys_write32(DMA_CTRL_ENA |
+			(0 << DMA_CTRL_ACK_TYPE_Pos)|
+			(SPI0_DMA_GROUP),
+			EVTRTR0_DMA_CTRL0 + (SPI0_DMA_RX_PERIPH_REQ * 4));
+	regdata = sys_read32(EVTRTR0_DMA_ACK_TYPE0 + (SPI0_DMA_GROUP * 4));
+	regdata |= (1 << SPI0_DMA_RX_PERIPH_REQ);
+	sys_write32(regdata, EVTRTR0_DMA_ACK_TYPE0 + (SPI0_DMA_GROUP * 4));
+
+	sys_write32(DMA_CTRL_ENA |
+			(0 << DMA_CTRL_ACK_TYPE_Pos)|
+			(SPI0_DMA_GROUP),
+			EVTRTR0_DMA_CTRL0 + (SPI0_DMA_TX_PERIPH_REQ * 4));
+	regdata = sys_read32(EVTRTR0_DMA_ACK_TYPE0 + (SPI0_DMA_GROUP * 4));
+	regdata |= (1 << SPI0_DMA_TX_PERIPH_REQ);
+	sys_write32(regdata, EVTRTR0_DMA_ACK_TYPE0 + (SPI0_DMA_GROUP * 4));
+}
+#endif
 void main(void)
 {
+#if DT_NODE_HAS_COMPAT_STATUS(DT_NODELABEL(dma2), arm_dma_pl330, okay)
+	configure_lpspi_for_dma2();
+#elif DT_NODE_HAS_COMPAT_STATUS(DT_NODELABEL(dma0), arm_dma_pl330, okay)
+	configure_spi0_lpspi_for_dma0();
+#endif
 
 	k_tid_t tids = k_thread_create(&SlaveT_data, SlaveT_stack, STACKSIZE,
 			&slave_spi, NULL, NULL, NULL,
