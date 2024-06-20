@@ -1,3 +1,5 @@
 # CODEOWNERS for autoreview assigning in github
 #
 /automation/                       @HemanthKumar-AlifSemi @jkrishnanjanappa
+/.checkpatch.conf/                 @HemanthKumar-AlifSemi
+/samples/drivers/spi_flash/        @HemanthKumar-AlifSemi @jkrishnanjanappa
